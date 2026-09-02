@@ -9,7 +9,7 @@
 <style>
   :root{
     --bg:#0f1117; --panel:#171a23; --border:#262a36; --text:#e8eaf0; --muted:#8b90a0;
-    --green:#2ecc71; --red:#e74c3c; --accent:#5b8cff;
+    --green:#2ecc71; --red:#e74c3c; --accent:#5b8cff; --amber:#f2c675;
   }
   *{box-sizing:border-box;}
   body{
@@ -45,6 +45,13 @@
   .led.on-green{background:var(--green); box-shadow:0 0 22px var(--green); color:#06331a; border-color:var(--green);}
   .led.on-red{background:var(--red); box-shadow:0 0 22px var(--red); color:#3a0d0d; border-color:var(--red);}
   #door-state{font-size:1.05rem; font-weight:700; text-align:center; padding:8px; border-radius:8px; background:#1b1e28;}
+  .progress-wrap{
+    background:#0b0d12; border:1px solid var(--border); border-radius:8px; height:14px; overflow:hidden;
+  }
+  .progress-bar{
+    height:100%; background:var(--amber); width:0%; transition:width .1s linear;
+  }
+  #hold-label{font-size:0.75rem; color:var(--muted); text-align:center;}
   #serial-log{
     background:#0b0d12; border:1px solid var(--border); border-radius:8px; padding:8px;
     height:140px; overflow-y:auto; font-family:monospace; font-size:0.75rem; color:#8ee38e;
@@ -67,10 +74,13 @@
 <div class="sub">Teachable Machine + micro:bit ผ่าน Web Serial API — เปิดด้วย Chrome/Edge บนคอมพิวเตอร์เท่านั้น</div>
 
 <div class="warn" id="model-warn">
-  ⚠️ <b>ข้อควรทราบสำคัญ:</b> โมเดลนี้มี 3 คลาส (Coco, Puri, Aek) แต่<b>ไม่มีคลาส "ไม่มีคน/พื้นหลัง"</b>
-  ระบบจะพยายามจำแนกภาพจากกล้องตลอดเวลา แม้ไม่มีใครอยู่หน้ากล้อง โมเดลก็จะยังทายว่าเป็นคนใดคนหนึ่งอยู่ดี (อาจสุ่มได้ 100% ผิดๆ)
-  <br>แนะนำให้กลับไปเทรนเพิ่ม <b>คลาสที่ 4 ชื่อ "None" หรือ "พื้นหลัง"</b> ด้วยภาพตอนไม่มีใครอยู่หน้ากล้อง แล้ว export โมเดลใหม่มาแทนที่ในโฟลเดอร์ <code>/model</code>
-  — ถ้าตรวจพบคลาสนั้น ระบบจะถือว่า "ไม่มีคนสแกน" ให้อัตโนมัติ (ไฟดับทั้งคู่) ระหว่างนี้จะใช้ปุ่ม "หยุดสแกนชั่วคราว" แทนไปก่อน
+  ✅ ตรวจพบโมเดล 5 คลาส: <b>Coco, Puri, Aek, Others, Background</b><br>
+  กติกาการทำงาน:
+  <ul style="margin:6px 0 0 18px; padding:0;">
+    <li>ถ้าจำแนกเป็น <b>Coco / Puri / Aek</b> ต่อเนื่องครบ <b id="hold-seconds-label">3</b> วินาที → เปิดประตู (servo + ไฟเขียว) — ถ้าคลาสเปลี่ยนหรือความมั่นใจตกก่อนครบเวลา จะนับใหม่</li>
+    <li>ถ้าจำแนกเป็น <b>Others</b> (คนไม่ทราบชื่อ) → ไฟแดงติดทันที</li>
+    <li>ถ้าจำแนกเป็น <b>Background</b> (ไม่มีคน) → ไฟดับทั้งคู่</li>
+  </ul>
 </div>
 
 <div class="layout">
@@ -97,14 +107,24 @@
 
     <div id="door-state">สถานะประตู: รอเริ่มระบบ</div>
 
+    <div>
+      <div class="progress-wrap"><div class="progress-bar" id="hold-progress"></div></div>
+      <div id="hold-label">รอสแกน...</div>
+    </div>
+
     <div class="leds">
       <div class="led" id="led-green">GREEN</div>
       <div class="led" id="led-red">RED</div>
     </div>
 
     <div>
-      <label>เกณฑ์ความแม่นยำ "ตรงคลาส" (%)</label>
-      <input type="number" id="threshold" value="100" min="90" max="100" step="0.1">
+      <label>เกณฑ์ความมั่นใจขั้นต่ำ (%)</label>
+      <input type="number" id="threshold" value="90" min="50" max="100" step="1">
+    </div>
+
+    <div>
+      <label>ระยะเวลาต้องขึ้นคลาสต่อเนื่อง (วินาที)</label>
+      <input type="number" id="hold-seconds" value="3" min="1" max="10" step="0.5">
     </div>
 
     <div>
@@ -117,12 +137,19 @@
 
 <script>
 const MODEL_URL = "./model/";
-let model, webcam, labelContainer, maxPredictions;
+let model, webcam, labelContainer, maxPredictions, classLabels;
 let port, writer, reader;
 let isPaused = false;
 let doorBusy = false;       // true while servo sequence (open->wait->close) is running
 let lastSentState = null;   // avoid spamming serial with repeated identical commands
-let backgroundLabelIndex = -1;
+
+// hold-timer state for "must stay on the same class for N seconds"
+let holdClass = null;
+let holdStartTime = null;
+
+const NAMED_CLASSES = ["Coco", "Puri", "Aek"];
+const OTHERS_CLASS = "Others";
+const BACKGROUND_CLASS = "Background";
 
 const els = {
   start: document.getElementById('start-btn'),
@@ -135,7 +162,15 @@ const els = {
   ledRed: document.getElementById('led-red'),
   log: document.getElementById('serial-log'),
   threshold: document.getElementById('threshold'),
+  holdSeconds: document.getElementById('hold-seconds'),
+  holdProgress: document.getElementById('hold-progress'),
+  holdLabel: document.getElementById('hold-label'),
+  holdSecondsLabel: document.getElementById('hold-seconds-label'),
 };
+
+els.holdSeconds.addEventListener('input', () => {
+  els.holdSecondsLabel.textContent = els.holdSeconds.value;
+});
 
 function logLine(msg){
   const t = new Date().toLocaleTimeString();
@@ -146,6 +181,13 @@ function logLine(msg){
 function setLeds(green, red){
   els.ledGreen.classList.toggle('on-green', green);
   els.ledRed.classList.toggle('on-red', red);
+}
+
+function resetHoldTimer(){
+  holdClass = null;
+  holdStartTime = null;
+  els.holdProgress.style.width = '0%';
+  els.holdLabel.textContent = 'รอสแกน...';
 }
 
 // ---------- Web Serial ----------
@@ -209,6 +251,7 @@ els.pause.addEventListener('click', () => {
   els.pause.textContent = isPaused ? '▶️ สแกนต่อ' : '⏸️ หยุดสแกนชั่วคราว';
   if (isPaused) {
     setLeds(false, false);
+    resetHoldTimer();
     els.doorState.textContent = 'สถานะประตู: หยุดสแกนชั่วคราว (ไฟดับทั้งคู่)';
     if (lastSentState !== 'OFF') { sendCommand('OFF'); lastSentState = 'OFF'; }
   }
@@ -222,16 +265,7 @@ async function initModel() {
     const metadataURL = MODEL_URL + "metadata.json";
     model = await tmImage.load(modelURL, metadataURL);
     maxPredictions = model.getTotalClasses();
-
-    const labels = model.getClassLabels ? model.getClassLabels() : [];
-    // detect an optional "background / none" class by common naming
-    backgroundLabelIndex = labels.findIndex(l =>
-      /^(none|background|ไม่มี|พื้นหลัง|no ?one)$/i.test(l.trim())
-    );
-    if (backgroundLabelIndex >= 0) {
-      document.getElementById('model-warn').innerHTML =
-        `✅ ตรวจพบคลาส "ไม่มีคน" (${labels[backgroundLabelIndex]}) ระบบจะปิดไฟทั้งคู่อัตโนมัติเมื่อไม่มีใครอยู่หน้ากล้อง`;
-    }
+    classLabels = model.getClassLabels ? model.getClassLabels() : [];
 
     webcam = new tmImage.Webcam(300, 300, true);
     await webcam.setup();
@@ -247,7 +281,7 @@ async function initModel() {
     els.pause.disabled = false;
     els.start.textContent = '✅ กล้องทำงานอยู่';
     els.doorState.textContent = 'สถานะประตู: ปิด (รอสแกน)';
-    logLine('โหลดโมเดลและกล้องสำเร็จ');
+    logLine('โหลดโมเดลและกล้องสำเร็จ (' + classLabels.join(', ') + ')');
   } catch (e) {
     els.start.disabled = false;
     els.start.textContent = '▶️ เริ่มกล้อง';
@@ -277,30 +311,57 @@ async function predict() {
   if (doorBusy) return; // ignore new triggers while servo sequence running
 
   const threshold = parseFloat(els.threshold.value) / 100;
-  const bestLabels = model.getClassLabels ? model.getClassLabels() : [];
-  const isBackground = backgroundLabelIndex >= 0 && best.className === bestLabels[backgroundLabelIndex];
+  const holdSecondsNeeded = parseFloat(els.holdSeconds.value);
+  const meetsThreshold = best.probability >= threshold;
 
-  if (isBackground) {
+  if (best.className === BACKGROUND_CLASS) {
+    resetHoldTimer();
     setLeds(false, false);
     els.doorState.textContent = 'สถานะประตู: ไม่มีคน (ไฟดับ)';
     if (lastSentState !== 'OFF') { sendCommand('OFF'); lastSentState = 'OFF'; }
-  } else if (best.probability >= threshold) {
-    // 100% match -> open sequence
-    if (lastSentState !== 'OPEN') {
-      lastSentState = 'OPEN';
-      await runOpenSequence(best.className);
-    }
-  } else {
+
+  } else if (best.className === OTHERS_CLASS && meetsThreshold) {
+    resetHoldTimer();
     setLeds(false, true);
-    els.doorState.textContent = `สถานะประตู: ไม่ตรงคลาส (${best.className} ${(best.probability*100).toFixed(1)}%)`;
+    els.doorState.textContent = `สถานะประตู: ไม่ทราบชื่อ (Others ${(best.probability*100).toFixed(1)}%)`;
     if (lastSentState !== 'RED') { sendCommand('RED'); lastSentState = 'RED'; }
+
+  } else if (NAMED_CLASSES.includes(best.className) && meetsThreshold) {
+    // sustained-hold logic: must stay on same named class continuously
+    const now = performance.now();
+    if (holdClass !== best.className) {
+      holdClass = best.className;
+      holdStartTime = now;
+    }
+    const elapsedSec = (now - holdStartTime) / 1000;
+    const pct = Math.min(100, (elapsedSec / holdSecondsNeeded) * 100);
+    els.holdProgress.style.width = pct + '%';
+    els.holdLabel.textContent = `${best.className}: ${elapsedSec.toFixed(1)}/${holdSecondsNeeded}s`;
+
+    if (elapsedSec >= holdSecondsNeeded) {
+      if (lastSentState !== 'OPEN') {
+        lastSentState = 'OPEN';
+        await runOpenSequence(best.className);
+      }
+    } else {
+      setLeds(false, false);
+      els.doorState.textContent = `สถานะประตู: กำลังยืนยันตัวตน (${best.className})`;
+    }
+
+  } else {
+    // below confidence threshold, or an unrecognized label -> treat like uncertain / no clean read
+    resetHoldTimer();
+    setLeds(false, false);
+    els.doorState.textContent = `สถานะประตู: ไม่ชัดเจน (${best.className} ${(best.probability*100).toFixed(1)}%)`;
+    if (lastSentState !== 'OFF') { sendCommand('OFF'); lastSentState = 'OFF'; }
   }
 }
 
 async function runOpenSequence(name){
   doorBusy = true;
+  resetHoldTimer();
   setLeds(true, false);
-  els.doorState.textContent = `สถานะประตู: กำลังเปิด... (จำแนกเป็น ${name} 100%)`;
+  els.doorState.textContent = `สถานะประตู: กำลังเปิด... (ยืนยันตัวตนเป็น ${name} สำเร็จ)`;
   await sendCommand('OPEN'); // micro:bit handles servo 0->180, hold 5s, 180->0 itself
   // mirror the timing on the web UI (micro:bit does the actual physical timing)
   await new Promise(r => setTimeout(r, 5000));
