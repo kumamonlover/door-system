@@ -143,7 +143,8 @@
 
 <script>
 const MODEL_URL = "./model/";
-let model, webcam, labelContainer, maxPredictions, classLabels;
+let model, labelContainer, maxPredictions, classLabels;
+let cameraStream = null, videoEl = null, canvasEl = null;
 let port, writer, reader;
 let isPaused = false;
 let doorBusy = false;       // true while servo sequence (open->wait->close) is running
@@ -287,22 +288,53 @@ async function populateCameras(){
 navigator.mediaDevices.addEventListener?.('devicechange', populateCameras);
 
 els.cameraSelect.addEventListener('change', async () => {
-  if (webcam) {
+  if (cameraStream) {
     // ถ้ากล้องทำงานอยู่แล้ว ให้สลับกล้องใหม่ทันทีโดยไม่ต้องโหลดโมเดลซ้ำ
     await switchCamera(els.cameraSelect.value);
   }
 });
 
+async function startCameraStream(deviceId){
+  if (cameraStream) {
+    cameraStream.getTracks().forEach(t => t.stop());
+    cameraStream = null;
+  }
+  const constraints = {
+    audio: false,
+    video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: 'user' }
+  };
+  cameraStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+  if (!videoEl) {
+    videoEl = document.createElement('video');
+    videoEl.setAttribute('playsinline', '');
+    videoEl.muted = true;
+  }
+  videoEl.srcObject = cameraStream;
+  await videoEl.play();
+
+  if (!canvasEl) {
+    canvasEl = document.createElement('canvas');
+    canvasEl.width = 300;
+    canvasEl.height = 300;
+  }
+  const container = document.getElementById('webcam-container');
+  container.innerHTML = '';
+  container.appendChild(canvasEl);
+}
+
+function drawFrame(){
+  if (!videoEl || videoEl.readyState < 2 || !canvasEl) return;
+  const ctx = canvasEl.getContext('2d');
+  ctx.save();
+  ctx.scale(-1, 1); // แสดงภาพแบบกระจก (มิเรอร์) เหมือนเดิม
+  ctx.drawImage(videoEl, -canvasEl.width, 0, canvasEl.width, canvasEl.height);
+  ctx.restore();
+}
+
 async function switchCamera(deviceId){
   try {
-    if (webcam) {
-      webcam.stop();
-      document.getElementById('webcam-container').innerHTML = '';
-    }
-    webcam = new tmImage.Webcam(300, 300, true);
-    await webcam.setup(deviceId || undefined);
-    await webcam.play();
-    document.getElementById('webcam-container').appendChild(webcam.canvas);
+    await startCameraStream(deviceId);
     logLine('สลับกล้องสำเร็จ');
   } catch (e) {
     logLine('สลับกล้องไม่สำเร็จ: ' + e.message);
@@ -331,13 +363,10 @@ async function initModel() {
     maxPredictions = model.getTotalClasses();
     classLabels = model.getClassLabels ? model.getClassLabels() : [];
 
-    webcam = new tmImage.Webcam(300, 300, true);
     const selectedDeviceId = els.cameraSelect.value || undefined;
-    await webcam.setup(selectedDeviceId);
-    await webcam.play();
+    await startCameraStream(selectedDeviceId);
     window.requestAnimationFrame(loop);
 
-    document.getElementById('webcam-container').appendChild(webcam.canvas);
     labelContainer = document.getElementById('label-container');
     for (let i = 0; i < maxPredictions; i++) {
       labelContainer.appendChild(document.createElement('div'));
@@ -357,15 +386,15 @@ async function initModel() {
 }
 
 async function loop() {
-  if (webcam) {
-    webcam.update();
+  if (cameraStream) {
+    drawFrame();
     if (!isPaused) await predict();
   }
   window.requestAnimationFrame(loop);
 }
 
 async function predict() {
-  const prediction = await model.predict(webcam.canvas);
+  const prediction = await model.predict(canvasEl);
   let best = { className: '', probability: 0 };
   for (let i = 0; i < maxPredictions; i++) {
     const p = prediction[i];
