@@ -320,12 +320,6 @@ async function predict() {
     els.doorState.textContent = 'สถานะประตู: ไม่มีคน (ไฟดับ)';
     if (lastSentState !== 'OFF') { sendCommand('OFF'); lastSentState = 'OFF'; }
 
-  } else if (best.className === OTHERS_CLASS && meetsThreshold) {
-    resetHoldTimer();
-    setLeds(false, true);
-    els.doorState.textContent = `สถานะประตู: ไม่ทราบชื่อ (Others ${(best.probability*100).toFixed(1)}%)`;
-    if (lastSentState !== 'RED') { sendCommand('RED'); lastSentState = 'RED'; }
-
   } else if (NAMED_CLASSES.includes(best.className) && meetsThreshold) {
     // sustained-hold logic: must stay on same named class continuously
     const now = performance.now();
@@ -349,11 +343,13 @@ async function predict() {
     }
 
   } else {
-    // below confidence threshold, or an unrecognized label -> treat like uncertain / no clean read
+    // ไม่ใช่ Background และไม่ใช่คนที่รู้จักที่ผ่านเกณฑ์ครบเวลา
+    // (รวม Others, คนรู้จักแต่ความมั่นใจไม่ถึงเกณฑ์, หรือค่าที่แกว่งไม่ชัดเจน)
+    // -> ไฟแดงติดค้างไว้ต่อเนื่อง ไม่สลับไปดับเอง จนกว่าจะสแกนผ่านหรือไม่มีคนแล้วจริงๆ (Background)
     resetHoldTimer();
-    setLeds(false, false);
-    els.doorState.textContent = `สถานะประตู: ไม่ชัดเจน (${best.className} ${(best.probability*100).toFixed(1)}%)`;
-    if (lastSentState !== 'OFF') { sendCommand('OFF'); lastSentState = 'OFF'; }
+    setLeds(false, true);
+    els.doorState.textContent = `สถานะประตู: ไม่ตรงคลาส (${best.className} ${(best.probability*100).toFixed(1)}%)`;
+    if (lastSentState !== 'RED') { sendCommand('RED'); lastSentState = 'RED'; }
   }
 }
 
