@@ -86,6 +86,12 @@
 <div class="layout">
 
   <div class="panel">
+    <div>
+      <label>เลือกกล้อง</label>
+      <div class="row" style="margin:0 0 10px 0;">
+        <select id="camera-select" style="flex:1;"></select>
+      </div>
+    </div>
     <div id="webcam-container"></div>
     <div class="row">
       <button id="start-btn">▶️ เริ่มกล้อง</button>
@@ -166,6 +172,7 @@ const els = {
   holdProgress: document.getElementById('hold-progress'),
   holdLabel: document.getElementById('hold-label'),
   holdSecondsLabel: document.getElementById('hold-seconds-label'),
+  cameraSelect: document.getElementById('camera-select'),
 };
 
 els.holdSeconds.addEventListener('input', () => {
@@ -245,6 +252,63 @@ async function sendCommand(cmd){
 }
 
 // ---------- Teachable Machine ----------
+async function populateCameras(){
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cams = devices.filter(d => d.kind === 'videoinput');
+    els.cameraSelect.innerHTML = '';
+    cams.forEach((cam, i) => {
+      const opt = document.createElement('option');
+      opt.value = cam.deviceId;
+      opt.textContent = cam.label || `กล้อง ${i + 1}`;
+      els.cameraSelect.appendChild(opt);
+    });
+    if (cams.length === 0) {
+      const opt = document.createElement('option');
+      opt.textContent = 'ไม่พบกล้อง';
+      els.cameraSelect.appendChild(opt);
+    }
+  } catch (e) {
+    logLine('อ่านรายชื่อกล้องไม่สำเร็จ: ' + e.message);
+  }
+}
+
+// ขอสิทธิ์กล้องก่อน (เพื่อให้เห็นชื่อกล้องจริงในรายการ) แล้วค่อยแสดงรายการให้เลือก
+(async () => {
+  try {
+    const tempStream = await navigator.mediaDevices.getUserMedia({ video: true });
+    tempStream.getTracks().forEach(t => t.stop());
+  } catch (e) {
+    // ผู้ใช้อาจยังไม่อนุญาต ณ ตอนนี้ - จะขอใหม่อีกครั้งตอนกดเริ่มกล้อง
+  }
+  await populateCameras();
+})();
+
+navigator.mediaDevices.addEventListener?.('devicechange', populateCameras);
+
+els.cameraSelect.addEventListener('change', async () => {
+  if (webcam) {
+    // ถ้ากล้องทำงานอยู่แล้ว ให้สลับกล้องใหม่ทันทีโดยไม่ต้องโหลดโมเดลซ้ำ
+    await switchCamera(els.cameraSelect.value);
+  }
+});
+
+async function switchCamera(deviceId){
+  try {
+    if (webcam) {
+      webcam.stop();
+      document.getElementById('webcam-container').innerHTML = '';
+    }
+    webcam = new tmImage.Webcam(300, 300, true);
+    await webcam.setup(deviceId || undefined);
+    await webcam.play();
+    document.getElementById('webcam-container').appendChild(webcam.canvas);
+    logLine('สลับกล้องสำเร็จ');
+  } catch (e) {
+    logLine('สลับกล้องไม่สำเร็จ: ' + e.message);
+  }
+}
+
 els.start.addEventListener('click', initModel);
 els.pause.addEventListener('click', () => {
   isPaused = !isPaused;
@@ -268,7 +332,8 @@ async function initModel() {
     classLabels = model.getClassLabels ? model.getClassLabels() : [];
 
     webcam = new tmImage.Webcam(300, 300, true);
-    await webcam.setup();
+    const selectedDeviceId = els.cameraSelect.value || undefined;
+    await webcam.setup(selectedDeviceId);
     await webcam.play();
     window.requestAnimationFrame(loop);
 
@@ -282,6 +347,7 @@ async function initModel() {
     els.start.textContent = '✅ กล้องทำงานอยู่';
     els.doorState.textContent = 'สถานะประตู: ปิด (รอสแกน)';
     logLine('โหลดโมเดลและกล้องสำเร็จ (' + classLabels.join(', ') + ')');
+    await populateCameras();
   } catch (e) {
     els.start.disabled = false;
     els.start.textContent = '▶️ เริ่มกล้อง';
