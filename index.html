@@ -77,9 +77,9 @@
   ✅ ตรวจพบโมเดล 5 คลาส: <b>Coco, Puri, Aek, Others, Background</b><br>
   กติกาการทำงาน:
   <ul style="margin:6px 0 0 18px; padding:0;">
-    <li>ถ้าจำแนกเป็น <b>Coco / Puri / Aek</b> ต่อเนื่องครบ <b id="hold-seconds-label">3</b> วินาที → เปิดประตู (servo + ไฟเขียว) — ถ้าคลาสเปลี่ยนหรือความมั่นใจตกก่อนครบเวลา จะนับใหม่</li>
-    <li>ถ้าจำแนกเป็น <b>Others</b> (คนไม่ทราบชื่อ) → ไฟแดงติดทันที</li>
-    <li>ถ้าจำแนกเป็น <b>Background</b> (ไม่มีคน) → ไฟดับทั้งคู่</li>
+    <li><b>ไฟแดงติดค้างเป็นค่าเริ่มต้นเสมอ</b> (ไม่ว่าจะไม่มีคน / เป็นคนไม่ทราบชื่อ / กำลังยืนยันตัวตนอยู่) จนกว่าจะสแกนผ่าน</li>
+    <li>ถ้าจำแนกเป็น <b>Coco / Puri / Aek</b> ต่อเนื่องครบ <b id="hold-seconds-label">3</b> วินาที → ถือว่าผ่าน → เปิดประตู (servo + ไฟเขียว) ไฟแดงดับชั่วคราว — ถ้าคลาสเปลี่ยนหรือความมั่นใจตกก่อนครบเวลา จะนับใหม่ (ไฟแดงยังติดอยู่)</li>
+    <li>หลังประตูปิด (ครบ 5 วิ) กลับสู่สถานะไฟแดงรอสแกนใหม่ทันที</li>
   </ul>
 </div>
 
@@ -411,9 +411,9 @@ async function predict() {
 
   if (best.className === BACKGROUND_CLASS) {
     resetHoldTimer();
-    setLeds(false, false);
-    els.doorState.textContent = 'สถานะประตู: ไม่มีคน (ไฟดับ)';
-    if (lastSentState !== 'OFF') { sendCommand('OFF'); lastSentState = 'OFF'; }
+    setLeds(false, true);
+    els.doorState.textContent = 'สถานะประตู: ยังไม่ผ่านการสแกน (ไม่มีคนอยู่หน้ากล้อง)';
+    if (lastSentState !== 'RED') { sendCommand('RED'); lastSentState = 'RED'; }
 
   } else if (NAMED_CLASSES.includes(best.className) && meetsThreshold) {
     // sustained-hold logic: must stay on same named class continuously
@@ -433,8 +433,9 @@ async function predict() {
         await runOpenSequence(best.className);
       }
     } else {
-      setLeds(false, false);
+      setLeds(false, true);
       els.doorState.textContent = `สถานะประตู: กำลังยืนยันตัวตน (${best.className})`;
+      if (lastSentState !== 'RED') { sendCommand('RED'); lastSentState = 'RED'; }
     }
 
   } else {
