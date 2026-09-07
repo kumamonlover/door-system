@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ระบบประตูอัจฉริยะ - Face Scan Door</title>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
+<style>
+  :root{
+    --bg:#0f1117; --panel:#171a23; --border:#262a36; --text:#e8eaf0; --muted:#8b90a0;
+    --green:#2ecc71; --red:#e74c3c; --accent:#5b8cff; --amber:#f2c675;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; font-family:'Segoe UI',Tahoma,sans-serif; background:var(--bg); color:var(--text);
+    display:flex; flex-direction:column; align-items:center; padding:24px 16px 60px;
+  }
+  h1{font-size:1.3rem; margin-bottom:4px;}
+  .sub{color:var(--muted); font-size:0.85rem; margin-bottom:20px; text-align:center;}
+  .layout{display:flex; gap:20px; flex-wrap:wrap; justify-content:center; width:100%; max-width:960px;}
+  .panel{
+    background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:18px;
+  }
+  #webcam-container{display:flex; justify-content:center; border-radius:10px; overflow:hidden;}
+  #label-container div{
+    display:flex; justify-content:space-between; padding:4px 2px; font-size:0.9rem; border-bottom:1px solid var(--border);
+  }
+  .row{display:flex; gap:10px; margin:10px 0; flex-wrap:wrap;}
+  button{
+    background:var(--accent); color:white; border:none; border-radius:8px; padding:10px 16px;
+    font-size:0.9rem; cursor:pointer; font-weight:600;
+  }
+  button.secondary{background:#2b2f3d;}
+  button:disabled{opacity:0.4; cursor:not-allowed;}
+  .status-card{
+    display:flex; flex-direction:column; gap:12px; min-width:260px;
+  }
+  .leds{display:flex; gap:16px; justify-content:center; padding:10px 0;}
+  .led{
+    width:60px; height:60px; border-radius:50%; border:3px solid #333;
+    display:flex; align-items:center; justify-content:center; font-size:0.7rem; color:#555;
+    background:#1b1e28; transition:all .15s;
+  }
+  .led.on-green{background:var(--green); box-shadow:0 0 22px var(--green); color:#06331a; border-color:var(--green);}
+  .led.on-red{background:var(--red); box-shadow:0 0 22px var(--red); color:#3a0d0d; border-color:var(--red);}
+  #door-state{font-size:1.05rem; font-weight:700; text-align:center; padding:8px; border-radius:8px; background:#1b1e28;}
+  .progress-wrap{
+    background:#0b0d12; border:1px solid var(--border); border-radius:8px; height:14px; overflow:hidden;
+  }
+  .progress-bar{
+    height:100%; background:var(--amber); width:0%; transition:width .1s linear;
+  }
+  #hold-label{font-size:0.75rem; color:var(--muted); text-align:center;}
+  #serial-log{
+    background:#0b0d12; border:1px solid var(--border); border-radius:8px; padding:8px;
+    height:140px; overflow-y:auto; font-family:monospace; font-size:0.75rem; color:#8ee38e;
+  }
+  .warn{
+    background:#332512; border:1px solid #6a4a12; color:#f2c675; border-radius:10px;
+    padding:12px 14px; font-size:0.8rem; max-width:960px; margin-bottom:18px; line-height:1.5;
+  }
+  .dot{width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:6px;}
+  .dot.ok{background:var(--green);} .dot.bad{background:var(--red);}
+  label{font-size:0.8rem; color:var(--muted); display:block; margin-bottom:4px;}
+  select,input[type=number]{
+    background:#0b0d12; color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px; width:100%;
+  }
+</style>
+</head>
+<body>
+
+<h1>🚪 ระบบประตูอัจฉริยะ (Face Scan Door)</h1>
+<div class="sub">Teachable Machine + micro:bit ผ่าน Web Serial API — เปิดด้วย Chrome/Edge บนคอมพิวเตอร์เท่านั้น</div>
+
+<div class="warn" id="model-warn">
+  ✅ ตรวจพบโมเดล 5 คลาส: <b>Coco, Puri, Aek, Others, Background</b><br>
+  กติกาการทำงาน:
+  <ul style="margin:6px 0 0 18px; padding:0;">
+    <li>ถ้าจำแนกเป็น <b>Coco / Puri / Aek</b> ต่อเนื่องครบ <b id="hold-seconds-label">3</b> วินาที → เปิดประตู (servo + ไฟเขียว) — ถ้าคลาสเปลี่ยนหรือความมั่นใจตกก่อนครบเวลา จะนับใหม่</li>
+    <li>ถ้าจำแนกเป็น <b>Others</b> (คนไม่ทราบชื่อ) → ไฟแดงติดทันที</li>
+    <li>ถ้าจำแนกเป็น <b>Background</b> (ไม่มีคน) → ไฟดับทั้งคู่</li>
+  </ul>
+</div>
+
+<div class="layout">
+
+  <div class="panel">
+    <div>
+      <label>เลือกกล้อง</label>
+      <div class="row" style="margin:0 0 10px 0;">
+        <select id="camera-select" style="flex:1;"></select>
+      </div>
+    </div>
+    <div id="webcam-container"></div>
+    <div class="row">
+      <button id="start-btn">▶️ เริ่มกล้อง</button>
+      <button id="pause-btn" class="secondary" disabled>⏸️ หยุดสแกนชั่วคราว</button>
+    </div>
+    <div id="label-container"></div>
+  </div>
+
+  <div class="panel status-card">
+    <div>
+      <label>Serial Port (micro:bit)</label>
+      <div class="row" style="margin:0;">
+        <button id="connect-btn">🔌 เชื่อมต่อ micro:bit</button>
+      </div>
+      <div style="font-size:0.8rem; margin-top:6px;">
+        <span class="dot bad" id="conn-dot"></span><span id="conn-text">ยังไม่ได้เชื่อมต่อ</span>
+      </div>
+    </div>
+
+    <div id="door-state">สถานะประตู: รอเริ่มระบบ</div>
+
+    <div>
+      <div class="progress-wrap"><div class="progress-bar" id="hold-progress"></div></div>
+      <div id="hold-label">รอสแกน...</div>
+    </div>
+
+    <div class="leds">
+      <div class="led" id="led-green">GREEN</div>
+      <div class="led" id="led-red">RED</div>
+    </div>
+
+    <div>
+      <label>เกณฑ์ความมั่นใจขั้นต่ำ (%)</label>
+      <input type="number" id="threshold" value="90" min="50" max="100" step="1">
+    </div>
+
+    <div>
+      <label>ระยะเวลาต้องขึ้นคลาสต่อเนื่อง (วินาที)</label>
+      <input type="number" id="hold-seconds" value="3" min="1" max="10" step="0.5">
+    </div>
+
+    <div>
+      <label>Serial log</label>
+      <div id="serial-log"></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const MODEL_URL = "./model/";
+let model, labelContainer, maxPredictions, classLabels;
+let cameraStream = null, videoEl = null, canvasEl = null;
+let port, writer, reader;
+let isPaused = false;
+let doorBusy = false;       // true while servo sequence (open->wait->close) is running
+let lastSentState = null;   // avoid spamming serial with repeated identical commands
+
+// hold-timer state for "must stay on the same class for N seconds"
+let holdClass = null;
+let holdStartTime = null;
+
+const NAMED_CLASSES = ["Coco", "Puri", "Aek"];
+const OTHERS_CLASS = "Others";
+const BACKGROUND_CLASS = "Background";
+
+const els = {
+  start: document.getElementById('start-btn'),
+  pause: document.getElementById('pause-btn'),
+  connect: document.getElementById('connect-btn'),
+  connDot: document.getElementById('conn-dot'),
+  connText: document.getElementById('conn-text'),
+  doorState: document.getElementById('door-state'),
+  ledGreen: document.getElementById('led-green'),
+  ledRed: document.getElementById('led-red'),
+  log: document.getElementById('serial-log'),
+  threshold: document.getElementById('threshold'),
+  holdSeconds: document.getElementById('hold-seconds'),
+  holdProgress: document.getElementById('hold-progress'),
+  holdLabel: document.getElementById('hold-label'),
+  holdSecondsLabel: document.getElementById('hold-seconds-label'),
+  cameraSelect: document.getElementById('camera-select'),
+};
+
+els.holdSeconds.addEventListener('input', () => {
+  els.holdSecondsLabel.textContent = els.holdSeconds.value;
+});
+
+function logLine(msg){
+  const t = new Date().toLocaleTimeString();
+  els.log.innerHTML += `[${t}] ${msg}<br>`;
+  els.log.scrollTop = els.log.scrollHeight;
+}
+
+function setLeds(green, red){
+  els.ledGreen.classList.toggle('on-green', green);
+  els.ledRed.classList.toggle('on-red', red);
+}
+
+function resetHoldTimer(){
+  holdClass = null;
+  holdStartTime = null;
+  els.holdProgress.style.width = '0%';
+  els.holdLabel.textContent = 'รอสแกน...';
+}
+
+// ---------- Web Serial ----------
+els.connect.addEventListener('click', async () => {
+  if (!('serial' in navigator)) {
+    alert('เบราว์เซอร์นี้ไม่รองรับ Web Serial API กรุณาใช้ Chrome หรือ Edge บนคอมพิวเตอร์');
+    return;
+  }
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    writer = port.writable.getWriter();
+    els.connDot.className = 'dot ok';
+    els.connText.textContent = 'เชื่อมต่อ micro:bit แล้ว';
+    els.connect.disabled = true;
+    logLine('เชื่อมต่อ serial สำเร็จ');
+    readLoop();
+  } catch (err) {
+    logLine('เชื่อมต่อไม่สำเร็จ: ' + err.message);
+  }
+});
+
+async function readLoop(){
+  const decoder = new TextDecoderStream();
+  const readableClosed = port.readable.pipeTo(decoder.writable);
+  reader = decoder.readable.getReader();
+  let buffer = '';
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) {
+        buffer += value;
+        let idx;
+        while ((idx = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 1);
+          if (line) logLine('micro:bit -> ' + line);
+        }
+      }
+    }
+  } catch (e) {
+    logLine('อ่าน serial ผิดพลาด: ' + e.message);
+  }
+}
+
+async function sendCommand(cmd){
+  if (!writer) return;
+  try {
+    await writer.write(new TextEncoder().encode(cmd + '\n'));
+    logLine('ส่งคำสั่ง -> ' + cmd);
+  } catch (e) {
+    logLine('ส่งคำสั่งไม่สำเร็จ: ' + e.message);
+  }
+}
+
+// ---------- Teachable Machine ----------
+async function populateCameras(){
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cams = devices.filter(d => d.kind === 'videoinput');
+    els.cameraSelect.innerHTML = '';
+    cams.forEach((cam, i) => {
+      const opt = document.createElement('option');
+      opt.value = cam.deviceId;
+      opt.textContent = cam.label || `กล้อง ${i + 1}`;
+      els.cameraSelect.appendChild(opt);
+    });
+    if (cams.length === 0) {
+      const opt = document.createElement('option');
+      opt.textContent = 'ไม่พบกล้อง';
+      els.cameraSelect.appendChild(opt);
+    }
+  } catch (e) {
+    logLine('อ่านรายชื่อกล้องไม่สำเร็จ: ' + e.message);
+  }
+}
+
+// ขอสิทธิ์กล้องก่อน (เพื่อให้เห็นชื่อกล้องจริงในรายการ) แล้วค่อยแสดงรายการให้เลือก
+(async () => {
+  try {
+    const tempStream = await navigator.mediaDevices.getUserMedia({ video: true });
+    tempStream.getTracks().forEach(t => t.stop());
+  } catch (e) {
+    // ผู้ใช้อาจยังไม่อนุญาต ณ ตอนนี้ - จะขอใหม่อีกครั้งตอนกดเริ่มกล้อง
+  }
+  await populateCameras();
+})();
+
+navigator.mediaDevices.addEventListener?.('devicechange', populateCameras);
+
+els.cameraSelect.addEventListener('change', async () => {
+  if (cameraStream) {
+    // ถ้ากล้องทำงานอยู่แล้ว ให้สลับกล้องใหม่ทันทีโดยไม่ต้องโหลดโมเดลซ้ำ
+    await switchCamera(els.cameraSelect.value);
+  }
+});
+
+async function startCameraStream(deviceId){
+  if (cameraStream) {
+    cameraStream.getTracks().forEach(t => t.stop());
+    cameraStream = null;
+  }
+  const constraints = {
+    audio: false,
+    video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: 'user' }
+  };
+  cameraStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+  if (!videoEl) {
+    videoEl = document.createElement('video');
+    videoEl.setAttribute('playsinline', '');
+    videoEl.muted = true;
+  }
+  videoEl.srcObject = cameraStream;
+  await videoEl.play();
+
+  if (!canvasEl) {
+    canvasEl = document.createElement('canvas');
+    canvasEl.width = 300;
+    canvasEl.height = 300;
+  }
+  const container = document.getElementById('webcam-container');
+  container.innerHTML = '';
+  container.appendChild(canvasEl);
+}
+
+function drawFrame(){
+  if (!videoEl || videoEl.readyState < 2 || !canvasEl) return;
+  const ctx = canvasEl.getContext('2d');
+  ctx.save();
+  ctx.scale(-1, 1); // แสดงภาพแบบกระจก (มิเรอร์) เหมือนเดิม
+  ctx.drawImage(videoEl, -canvasEl.width, 0, canvasEl.width, canvasEl.height);
+  ctx.restore();
+}
+
+async function switchCamera(deviceId){
+  try {
+    await startCameraStream(deviceId);
+    logLine('สลับกล้องสำเร็จ');
+  } catch (e) {
+    logLine('สลับกล้องไม่สำเร็จ: ' + e.message);
+  }
+}
+
+els.start.addEventListener('click', initModel);
+els.pause.addEventListener('click', () => {
+  isPaused = !isPaused;
+  els.pause.textContent = isPaused ? '▶️ สแกนต่อ' : '⏸️ หยุดสแกนชั่วคราว';
+  if (isPaused) {
+    setLeds(false, false);
+    resetHoldTimer();
+    els.doorState.textContent = 'สถานะประตู: หยุดสแกนชั่วคราว (ไฟดับทั้งคู่)';
+    if (lastSentState !== 'OFF') { sendCommand('OFF'); lastSentState = 'OFF'; }
+  }
+});
+
+async function initModel() {
+  els.start.disabled = true;
+  els.start.textContent = 'กำลังโหลด...';
+  try {
+    const modelURL = MODEL_URL + "model.json";
+    const metadataURL = MODEL_URL + "metadata.json";
+    model = await tmImage.load(modelURL, metadataURL);
+    maxPredictions = model.getTotalClasses();
+    classLabels = model.getClassLabels ? model.getClassLabels() : [];
+
+    const selectedDeviceId = els.cameraSelect.value || undefined;
+    await startCameraStream(selectedDeviceId);
+    window.requestAnimationFrame(loop);
+
+    labelContainer = document.getElementById('label-container');
+    for (let i = 0; i < maxPredictions; i++) {
+      labelContainer.appendChild(document.createElement('div'));
+    }
+
+    els.pause.disabled = false;
+    els.start.textContent = '✅ กล้องทำงานอยู่';
+    els.doorState.textContent = 'สถานะประตู: ปิด (รอสแกน)';
+    logLine('โหลดโมเดลและกล้องสำเร็จ (' + classLabels.join(', ') + ')');
+    await populateCameras();
+  } catch (e) {
+    els.start.disabled = false;
+    els.start.textContent = '▶️ เริ่มกล้อง';
+    logLine('โหลดโมเดล/กล้องล้มเหลว: ' + e.message);
+    alert('โหลดโมเดลหรือกล้องไม่สำเร็จ: ' + e.message);
+  }
+}
+
+async function loop() {
+  if (cameraStream) {
+    drawFrame();
+    if (!isPaused) await predict();
+  }
+  window.requestAnimationFrame(loop);
+}
+
+async function predict() {
+  const prediction = await model.predict(canvasEl);
+  let best = { className: '', probability: 0 };
+  for (let i = 0; i < maxPredictions; i++) {
+    const p = prediction[i];
+    labelContainer.childNodes[i].innerHTML =
+      `<span>${p.className}</span><span>${(p.probability * 100).toFixed(1)}%</span>`;
+    if (p.probability > best.probability) best = p;
+  }
+
+  if (doorBusy) return; // ignore new triggers while servo sequence running
+
+  const threshold = parseFloat(els.threshold.value) / 100;
+  const holdSecondsNeeded = parseFloat(els.holdSeconds.value);
+  const meetsThreshold = best.probability >= threshold;
+
+  if (best.className === BACKGROUND_CLASS) {
+    resetHoldTimer();
+    setLeds(false, false);
+    els.doorState.textContent = 'สถานะประตู: ไม่มีคน (ไฟดับ)';
+    if (lastSentState !== 'OFF') { sendCommand('OFF'); lastSentState = 'OFF'; }
+
+  } else if (NAMED_CLASSES.includes(best.className) && meetsThreshold) {
+    // sustained-hold logic: must stay on same named class continuously
+    const now = performance.now();
+    if (holdClass !== best.className) {
+      holdClass = best.className;
+      holdStartTime = now;
+    }
+    const elapsedSec = (now - holdStartTime) / 1000;
+    const pct = Math.min(100, (elapsedSec / holdSecondsNeeded) * 100);
+    els.holdProgress.style.width = pct + '%';
+    els.holdLabel.textContent = `${best.className}: ${elapsedSec.toFixed(1)}/${holdSecondsNeeded}s`;
+
+    if (elapsedSec >= holdSecondsNeeded) {
+      if (lastSentState !== 'OPEN') {
+        lastSentState = 'OPEN';
+        await runOpenSequence(best.className);
+      }
+    } else {
+      setLeds(false, false);
+      els.doorState.textContent = `สถานะประตู: กำลังยืนยันตัวตน (${best.className})`;
+    }
+
+  } else {
+    // ไม่ใช่ Background และไม่ใช่คนที่รู้จักที่ผ่านเกณฑ์ครบเวลา
+    // (รวม Others, คนรู้จักแต่ความมั่นใจไม่ถึงเกณฑ์, หรือค่าที่แกว่งไม่ชัดเจน)
+    // -> ไฟแดงติดค้างไว้ต่อเนื่อง ไม่สลับไปดับเอง จนกว่าจะสแกนผ่านหรือไม่มีคนแล้วจริงๆ (Background)
+    resetHoldTimer();
+    setLeds(false, true);
+    els.doorState.textContent = `สถานะประตู: ไม่ตรงคลาส (${best.className} ${(best.probability*100).toFixed(1)}%)`;
+    if (lastSentState !== 'RED') { sendCommand('RED'); lastSentState = 'RED'; }
+  }
+}
+
+async function runOpenSequence(name){
+  doorBusy = true;
+  resetHoldTimer();
+  setLeds(true, false);
+  els.doorState.textContent = `สถานะประตู: กำลังเปิด... (ยืนยันตัวตนเป็น ${name} สำเร็จ)`;
+  await sendCommand('OPEN'); // micro:bit handles servo 0->180, hold 5s, 180->0 itself
+  // mirror the timing on the web UI (micro:bit does the actual physical timing)
+  await new Promise(r => setTimeout(r, 5000));
+  setLeds(false, false);
+  els.doorState.textContent = 'สถานะประตู: ปิด (รอสแกน)';
+  lastSentState = 'OFF';
+  doorBusy = false;
+}
+</script>
+</body>
+</html>
